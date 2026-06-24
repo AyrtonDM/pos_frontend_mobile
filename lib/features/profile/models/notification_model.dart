@@ -22,6 +22,17 @@ class NotificationModel {
   });
 
   factory NotificationModel.fromJson(Map<String, dynamic> json) {
+    String fechaStr = json['fecha']?.toString() ?? '';
+    DateTime parsedDate;
+    if (fechaStr.isNotEmpty) {
+      if (!fechaStr.endsWith('Z') && !fechaStr.contains('+') && !RegExp(r'-\d{2}:\d{2}$').hasMatch(fechaStr)) {
+        fechaStr = '${fechaStr}Z';
+      }
+      parsedDate = DateTime.tryParse(fechaStr)?.toLocal() ?? DateTime.now();
+    } else {
+      parsedDate = DateTime.now();
+    }
+
     return NotificationModel(
       id: int.tryParse(json['id']?.toString() ?? '') ?? 0,
       idEmpresa: json['id_empresa'] != null ? int.tryParse(json['id_empresa'].toString()) : null,
@@ -31,7 +42,7 @@ class NotificationModel {
       mensaje: json['mensaje']?.toString() ?? '',
       payload: json['payload'] is Map<String, dynamic> ? json['payload'] as Map<String, dynamic> : null,
       leido: json['leido'] == true,
-      fecha: DateTime.tryParse(json['fecha']?.toString() ?? '') ?? DateTime.now(),
+      fecha: parsedDate,
     );
   }
 }

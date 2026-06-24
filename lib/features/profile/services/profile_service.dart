@@ -43,6 +43,14 @@ class ProfileService {
     throw const ApiException('Respuesta de categoría inválida del servidor');
   }
 
+  Future<List<ClientCategory>> getCompanyCategories(int companyId) async {
+    final response = await _apiService.get('/api/categorias-cliente/$companyId');
+    if (response is List) {
+      return response.map((json) => ClientCategory.fromJson(json as Map<String, dynamic>)).toList();
+    }
+    return [];
+  }
+
   Future<ClientCompanyDetail?> getClientDetail(int companyId, int userId) async {
     final response = await _apiService.get('/api/empresas/$companyId/clientes');
     if (response is List) {
@@ -64,14 +72,25 @@ class ProfileService {
     return [];
   }
 
-  Future<List<NotificationModel>> getNotifications(int companyId) async {
-    final response = await _apiService.get('/notifications/history/empresas/$companyId');
+  Future<List<NotificationModel>> getNotifications(int companyId, int userId) async {
+    final response = await _apiService.get('/notifications/history/empresas/$companyId?id_usuario=$userId');
     if (response is Map<String, dynamic> && response['items'] is List) {
       final items = response['items'] as List;
       final list = items.map((json) => NotificationModel.fromJson(json as Map<String, dynamic>)).toList();
+      
+      // Client-side safety filter: keep only user-specific alerts
+      final filteredList = list.where((n) {
+        final payload = n.payload;
+        if (payload != null && payload.containsKey('id_usuario')) {
+          final notifUserId = int.tryParse(payload['id_usuario'].toString());
+          return notifUserId == userId;
+        }
+        return false;
+      }).toList();
+
       // Sort newest first
-      list.sort((a, b) => b.fecha.compareTo(a.fecha));
-      return list;
+      filteredList.sort((a, b) => b.fecha.compareTo(a.fecha));
+      return filteredList;
     }
     return [];
   }
@@ -79,6 +98,22 @@ class ProfileService {
   Future<bool> markNotificationAsRead(int notificationId) async {
     try {
       final response = await _apiService.post('/notifications/mark-read', {'id': notificationId});
+      if (response is Map<String, dynamic> && response['ok'] == true) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  Future<bool> registerDeviceToken(String token, int userId, int companyId) async {
+    try {
+      final response = await _apiService.post('/notifications/register-token', {
+        'token': token,
+        'uid_usuario': userId.toString(),
+        'rol': 'CLIENTE',
+        'plataforma': 'android',
+        'id_empresa': companyId,
+      });
       if (response is Map<String, dynamic> && response['ok'] == true) {
         return true;
       }

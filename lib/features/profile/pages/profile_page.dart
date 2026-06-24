@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 import '../../../app/router.dart';
 import '../../../core/constants/app_palette.dart';
@@ -38,6 +41,11 @@ class _ProfilePageState extends State<ProfilePage> {
   ClientCategory? _selectedCategory;
   ClientCompanyDetail? _companyDetail;
 
+  // Financial fields
+  double _utilizedCredit = 0.0;
+  double _limitCredit = 0.0;
+  double _availableCredit = 0.0;
+
   // Navigation menu state
   int _currentSectionIndex = 0; // 0 = Home, 1 = Credits, 2 = Notifications
 
@@ -71,6 +79,9 @@ class _ProfilePageState extends State<ProfilePage> {
       _userId = int.parse(userIdStr);
       _userEmail = email;
 
+      // Initialize Firebase Messaging
+      _initFirebaseMessaging();
+
       // Fetch companies and client profiles in parallel
       final results = await Future.wait([
         _profileService.getMyCompanies(),
@@ -81,30 +92,25 @@ class _ProfilePageState extends State<ProfilePage> {
       _clientProfiles = results[1] as List<ClientProfile>;
 
       if (_companies.isNotEmpty && _clientProfiles.isNotEmpty) {
-        // Find first company that also has a client profile
-        for (final company in _companies) {
-          final profile = _clientProfiles.firstWhere(
-            (p) => p.idUsuario == _userId,
-            orElse: () => const ClientProfile(
-              idCliente: 0,
-              idUsuario: 0,
-              codigoCliente: '',
-              saldoCredito: 0,
-              limiteCredito: 0,
-              activo: false,
-            ),
-          );
-
-          if (profile.idCliente != 0) {
-            _selectedCompany = company;
-            _selectedProfile = profile;
-            break;
-          }
+        _selectedCompany = _companies.first;
+        
+        // Get real Firebase Cloud Messaging token
+        String? fcmToken;
+        try {
+          fcmToken = await FirebaseMessaging.instance.getToken();
+          debugPrint('FCM Token obtenido: $fcmToken');
+        } catch (e) {
+          debugPrint('Error al obtener token FCM: $e');
         }
-
-        // If no matching profile was found, default to first of each (fallback)
-        _selectedCompany ??= _companies.first;
-        _selectedProfile ??= _clientProfiles.first;
+        
+        // Register token for all companies
+        for (final company in _companies) {
+          _profileService.registerDeviceToken(
+            fcmToken ?? 'mock_token_user_${_userId}_company_${company.idEmpresa}',
+            _userId!,
+            company.idEmpresa,
+          );
+        }
 
         await _loadSelectedCompanyDetails();
       } else {
@@ -120,6 +126,135 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  Future<void> _initFirebaseMessaging() async {
+    // Request permission for push notifications
+    final messaging = FirebaseMessaging.instance;
+    try {
+      NotificationSettings settings = await messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      debugPrint('Permiso de notificaciones push de Firebase: ${settings.authorizationStatus}');
+    } catch (e) {
+      debugPrint('Error al solicitar permiso de notificaciones Firebase: $e');
+    }
+
+    // Handle background notifications when app is clicked/opened
+    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      debugPrint('Push de Firebase presionada en background/terminated');
+      _handleFirebaseMessageClick(message);
+    });
+
+    // Check if app was opened via a notification when terminated
+    try {
+      RemoteMessage? initialMessage = await messaging.getInitialMessage();
+      if (initialMessage != null) {
+        debugPrint('App abierta desde estado terminado vía push de Firebase');
+        _handleFirebaseMessageClick(initialMessage);
+      }
+    } catch (e) {
+      debugPrint('Error al obtener mensaje inicial de Firebase: $e');
+    }
+
+    // Listen to foreground notifications
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      debugPrint('Mensaje push de Firebase recibido en primer plano: ${message.notification?.title}');
+      final notification = message.notification;
+      if (notification != null && mounted) {
+        final companyIdStr = message.data['id_empresa'];
+        final companyId = companyIdStr != null ? int.tryParse(companyIdStr.toString()) : null;
+
+        // Display a beautiful floating SnackBar in foreground
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppPalette.text,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            content: Row(
+              children: [
+                const Icon(
+                  Icons.notifications_active,
+                  color: AppPalette.primary,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        notification.title ?? 'Nueva notificación',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        notification.body ?? '',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            action: SnackBarAction(
+              label: 'Ver Créditos',
+              textColor: AppPalette.primary,
+              onPressed: () {
+                _goToCreditsForCompany(companyId);
+              },
+            ),
+            duration: const Duration(seconds: 8),
+          ),
+        );
+
+        // Trigger a reload of selected company details to update notifications history list
+        _loadSelectedCompanyDetails();
+      }
+    });
+  }
+
+  void _handleFirebaseMessageClick(RemoteMessage message) {
+    final companyIdStr = message.data['id_empresa'];
+    final companyId = companyIdStr != null ? int.tryParse(companyIdStr.toString()) : null;
+    _goToCreditsForCompany(companyId);
+  }
+
+  Future<void> _goToCreditsForCompany(int? companyId) async {
+    if (!mounted) return;
+    if (companyId != null) {
+      final matched = _companies.firstWhere(
+        (c) => c.idEmpresa == companyId,
+        orElse: () => _selectedCompany ?? _companies.first,
+      );
+      if (matched.idEmpresa != 0 && matched != _selectedCompany) {
+        setState(() {
+          _selectedCompany = matched;
+          _currentSectionIndex = 1; // Ir al apartado de Créditos
+        });
+        await _loadSelectedCompanyDetails();
+        return;
+      }
+    }
+    setState(() {
+      _currentSectionIndex = 1; // Ir al apartado de Créditos
+    });
+  }
+
   Future<void> _loadSelectedCompanyDetails() async {
     if (_selectedCompany == null || _userId == null) return;
 
@@ -128,48 +263,82 @@ class _ProfilePageState extends State<ProfilePage> {
         _isLoading = true;
       });
 
-      // 1. Fetch detailed profile info of client within this company (gets persona details)
+      // 1. Fetch company category list to match which profile belongs to this company
+      final categories = await _profileService.getCompanyCategories(_selectedCompany!.idEmpresa);
+
+      ClientProfile? matchedProfile;
+      ClientCategory? matchedCategory;
+
+      for (final profile in _clientProfiles) {
+        final category = categories.firstWhere(
+          (c) => c.idCategoriaCliente == profile.idCategoriaCliente,
+          orElse: () => const ClientCategory(
+            idCategoriaCliente: 0,
+            idEmpresa: 0,
+            nombre: '',
+            plazoCredito: 0,
+            descuentoBase: 0,
+            limiteCredito: 0,
+            activo: false,
+          ),
+        );
+        if (category.idCategoriaCliente != 0) {
+          matchedProfile = profile;
+          matchedCategory = category;
+          break;
+        }
+      }
+
+      _selectedProfile = matchedProfile;
+      _selectedCategory = matchedCategory;
+
+      // 2. Fetch detailed profile info of client within this company (gets persona details)
       _companyDetail = await _profileService.getClientDetail(
         _selectedCompany!.idEmpresa,
         _userId!,
       );
 
-      // If the company detail returns a client profile, override our selected profile
-      if (_companyDetail?.cliente != null) {
-        _selectedProfile = _companyDetail!.cliente;
-      }
-
-      // 2. Fetch category details if category ID exists
-      if (_selectedProfile?.idCategoriaCliente != null) {
-        _selectedCategory = await _profileService.getCategory(
+      // Calculate financial values
+      if (_selectedProfile != null) {
+        // Limit: Use profile override if > 0, otherwise category limit
+        _limitCredit = _selectedProfile!.limiteCredito > 0 
+            ? _selectedProfile!.limiteCredito 
+            : (_selectedCategory?.limiteCredito ?? 0.0);
+            
+        // Fetch credits to calculate actual utilized credit
+        final credits = await _profileService.getClientCredits(
           _selectedCompany!.idEmpresa,
-          _selectedProfile!.idCategoriaCliente!,
+          _selectedProfile!.idCliente,
         );
+        
+        double pendingSum = 0.0;
+        for (final c in credits) {
+          if (c.estado != 'PAGADA' && c.estado != 'ANULADA') {
+            pendingSum += c.saldoPendiente;
+          }
+        }
+        _utilizedCredit = pendingSum;
+        _availableCredit = (_limitCredit - _utilizedCredit) > 0 ? (_limitCredit - _utilizedCredit) : 0.0;
       } else {
-        _selectedCategory = null;
+        _limitCredit = 0.0;
+        _utilizedCredit = 0.0;
+        _availableCredit = 0.0;
       }
 
-      // 3. Populate mock notifications (local demonstration as requested)
-      _notifications = [
-        NotificationModel(
-          id: 1,
-          prioridad: 1,
-          tipo: 'CREDITO',
-          titulo: 'Línea de crédito aprobada',
-          mensaje: 'Tu línea de crédito ha sido habilitada en ${_selectedCompany!.nombre}.',
-          leido: false,
-          fecha: DateTime.now().subtract(const Duration(hours: 2)),
-        ),
-        NotificationModel(
-          id: 2,
-          prioridad: 0,
-          tipo: 'GENERAL',
-          titulo: 'Bienvenido a la aplicación',
-          mensaje: 'Ya puedes realizar el seguimiento de tus créditos e historial de abonos.',
-          leido: false,
-          fecha: DateTime.now().subtract(const Duration(days: 1)),
-        ),
-      ];
+      // 3. Fetch notifications for all companies in parallel
+      final List<Future<List<NotificationModel>>> notificationFutures = _companies.map((company) {
+        return _profileService.getNotifications(company.idEmpresa, _userId!);
+      }).toList();
+
+      final List<List<NotificationModel>> notificationsLists = await Future.wait(notificationFutures);
+      
+      // Flatten and sort the notifications by date (newest first)
+      final List<NotificationModel> allNotifications = [];
+      for (final list in notificationsLists) {
+        allNotifications.addAll(list);
+      }
+      allNotifications.sort((a, b) => b.fecha.compareTo(a.fecha));
+      _notifications = allNotifications;
 
       setState(() {
         _isLoading = false;
@@ -187,11 +356,6 @@ class _ProfilePageState extends State<ProfilePage> {
 
     setState(() {
       _selectedCompany = newCompany;
-      // Find matching client profile
-      _selectedProfile = _clientProfiles.firstWhere(
-        (p) => p.idUsuario == _userId,
-        orElse: () => _clientProfiles.first,
-      );
     });
 
     await _loadSelectedCompanyDetails();
@@ -227,25 +391,28 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
-  void _markAsRead(NotificationModel notification) {
+  Future<void> _markAsRead(NotificationModel notification) async {
     if (notification.leido) return;
 
-    setState(() {
-      final index = _notifications.indexWhere((n) => n.id == notification.id);
-      if (index != -1) {
-        _notifications[index] = NotificationModel(
-          id: notification.id,
-          idEmpresa: notification.idEmpresa,
-          prioridad: notification.prioridad,
-          tipo: notification.tipo,
-          titulo: notification.titulo,
-          mensaje: notification.mensaje,
-          payload: notification.payload,
-          leido: true,
-          fecha: notification.fecha,
-        );
-      }
-    });
+    final success = await _profileService.markNotificationAsRead(notification.id);
+    if (success && mounted) {
+      setState(() {
+        final index = _notifications.indexWhere((n) => n.id == notification.id);
+        if (index != -1) {
+          _notifications[index] = NotificationModel(
+            id: notification.id,
+            idEmpresa: notification.idEmpresa,
+            prioridad: notification.prioridad,
+            tipo: notification.tipo,
+            titulo: notification.titulo,
+            mensaje: notification.mensaje,
+            payload: notification.payload,
+            leido: true,
+            fecha: notification.fecha,
+          );
+        }
+      });
+    }
   }
 
   int get _unreadCount {
@@ -284,6 +451,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   _currentSectionIndex = index;
                 });
                 Navigator.of(context).pop(); // Close drawer
+                _loadSelectedCompanyDetails(); // Refresh details/notifications from server
               },
               onLogout: _logout,
             ),
@@ -353,9 +521,15 @@ class _ProfilePageState extends State<ProfilePage> {
                           ),
                         ),
                       )
-                    : SingleChildScrollView(
-                        padding: const EdgeInsets.all(16),
-                        child: _buildActiveSection(persona),
+                    : RefreshIndicator(
+                        onRefresh: _loadSelectedCompanyDetails,
+                        color: AppPalette.primary,
+                        backgroundColor: AppPalette.surface,
+                        child: SingleChildScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.all(16),
+                          child: _buildActiveSection(persona),
+                        ),
                       ),
       ),
     );
@@ -555,9 +729,9 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildCreditSummaryCard() {
-    final double limit = _selectedProfile?.limiteCredito ?? 0.0;
-    final double used = _selectedProfile?.saldoCredito ?? 0.0;
-    final double available = (limit - used) > 0 ? (limit - used) : 0.0;
+    final double limit = _limitCredit;
+    final double used = _utilizedCredit;
+    final double available = _availableCredit;
 
     final progress = limit > 0 ? (used / limit).clamp(0.0, 1.0) : 0.0;
     final isLimitExceeded = used > limit;
@@ -696,7 +870,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     const SizedBox(height: 4),
                     Text(
                       _selectedCategory != null 
-                          ? '${(_selectedCategory!.descuentoBase * 100).toStringAsFixed(1)}%' 
+                          ? '${_selectedCategory!.descuentoBase.toStringAsFixed(1)}%' 
                           : '0.0%',
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                     ),
@@ -764,6 +938,10 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildNotificationsSection() {
+    return _buildNotificationsList();
+  }
+
+  Widget _buildNotificationsList() {
     if (_notifications.isEmpty) {
       return Card(
         color: AppPalette.surface,
@@ -824,7 +1002,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     const Icon(Icons.notifications_active_outlined, color: AppPalette.primary),
                     const SizedBox(width: 8),
                     Text(
-                      'Historial de Alertas (${_notifications.length})',
+                      'Historial (${_notifications.length})',
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
@@ -862,7 +1040,10 @@ class _ProfilePageState extends State<ProfilePage> {
                 }
 
                 return InkWell(
-                  onTap: () => _markAsRead(notification),
+                  onTap: () {
+                    _markAsRead(notification);
+                    _goToCreditsForCompany(notification.idEmpresa);
+                  },
                   borderRadius: BorderRadius.circular(8),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
@@ -938,22 +1119,47 @@ class _ProfilePageState extends State<ProfilePage> {
                                       fontSize: 11,
                                     ),
                                   ),
-                                  if (notification.prioridad > 0)
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                                      decoration: BoxDecoration(
-                                        color: priorityColor.withValues(alpha: 0.1),
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
-                                      child: Text(
-                                        notification.prioridad > 1 ? 'ALTA' : 'MEDIA',
-                                        style: TextStyle(
-                                          color: priorityColor,
-                                          fontSize: 9,
-                                          fontWeight: FontWeight.bold,
+                                  Row(
+                                    children: [
+                                      // Company Badge
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                        decoration: BoxDecoration(
+                                          color: AppPalette.primary.withValues(alpha: 0.1),
+                                          borderRadius: BorderRadius.circular(4),
+                                          border: Border.all(
+                                            color: AppPalette.primary.withValues(alpha: 0.3),
+                                          ),
+                                        ),
+                                        child: Text(
+                                          _getCompanyName(notification.idEmpresa),
+                                          style: const TextStyle(
+                                            color: AppPalette.primary,
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.bold,
+                                          ),
                                         ),
                                       ),
-                                    ),
+                                      if (notification.prioridad > 0) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: priorityColor.withValues(alpha: 0.1),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            notification.prioridad > 1 ? 'ALTA' : 'MEDIA',
+                                            style: TextStyle(
+                                              color: priorityColor,
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
                                 ],
                               ),
                             ],
@@ -969,6 +1175,16 @@ class _ProfilePageState extends State<ProfilePage> {
         ),
       ),
     );
+  }
+
+  String _getCompanyName(int? companyId) {
+    if (companyId == null) return 'Sistema';
+    for (final company in _companies) {
+      if (company.idEmpresa == companyId) {
+        return company.nombre;
+      }
+    }
+    return 'Empresa #$companyId';
   }
 
   String _formatDateTime(DateTime date) {
