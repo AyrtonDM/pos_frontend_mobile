@@ -149,8 +149,27 @@ class _ProfilePageState extends State<ProfilePage> {
         _selectedCategory = null;
       }
 
-      // 3. Fetch notifications history for the selected company
-      _notifications = await _profileService.getNotifications(_selectedCompany!.idEmpresa);
+      // 3. Populate mock notifications (local demonstration as requested)
+      _notifications = [
+        NotificationModel(
+          id: 1,
+          prioridad: 1,
+          tipo: 'CREDITO',
+          titulo: 'Línea de crédito aprobada',
+          mensaje: 'Tu línea de crédito ha sido habilitada en ${_selectedCompany!.nombre}.',
+          leido: false,
+          fecha: DateTime.now().subtract(const Duration(hours: 2)),
+        ),
+        NotificationModel(
+          id: 2,
+          prioridad: 0,
+          tipo: 'GENERAL',
+          titulo: 'Bienvenido a la aplicación',
+          mensaje: 'Ya puedes realizar el seguimiento de tus créditos e historial de abonos.',
+          leido: false,
+          fecha: DateTime.now().subtract(const Duration(days: 1)),
+        ),
+      ];
 
       setState(() {
         _isLoading = false;
@@ -208,30 +227,25 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
-  Future<void> _markAsRead(NotificationModel notification) async {
+  void _markAsRead(NotificationModel notification) {
     if (notification.leido) return;
 
-    try {
-      final success = await _profileService.markNotificationAsRead(notification.id);
-      if (success && mounted) {
-        setState(() {
-          final index = _notifications.indexWhere((n) => n.id == notification.id);
-          if (index != -1) {
-            _notifications[index] = NotificationModel(
-              id: notification.id,
-              idEmpresa: notification.idEmpresa,
-              prioridad: notification.prioridad,
-              tipo: notification.tipo,
-              titulo: notification.titulo,
-              mensaje: notification.mensaje,
-              payload: notification.payload,
-              leido: true,
-              fecha: notification.fecha,
-            );
-          }
-        });
+    setState(() {
+      final index = _notifications.indexWhere((n) => n.id == notification.id);
+      if (index != -1) {
+        _notifications[index] = NotificationModel(
+          id: notification.id,
+          idEmpresa: notification.idEmpresa,
+          prioridad: notification.prioridad,
+          tipo: notification.tipo,
+          titulo: notification.titulo,
+          mensaje: notification.mensaje,
+          payload: notification.payload,
+          leido: true,
+          fecha: notification.fecha,
+        );
       }
-    } catch (_) {}
+    });
   }
 
   int get _unreadCount {
