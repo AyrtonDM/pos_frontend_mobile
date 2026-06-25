@@ -219,10 +219,14 @@ class _CreditsPageState extends State<CreditsPage> with SingleTickerProviderStat
   }
 
   Widget _buildCreditList(List<AccountReceivable> list, String emptyMsg, IconData emptyIcon, Color iconColor) {
+    Widget content;
     if (list.isEmpty) {
-      return Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+      content = SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(24),
+        child: Container(
+          alignment: Alignment.center,
+          constraints: const BoxConstraints(minHeight: 300),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -241,15 +245,23 @@ class _CreditsPageState extends State<CreditsPage> with SingleTickerProviderStat
           ),
         ),
       );
+    } else {
+      content = ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16),
+        itemCount: list.length,
+        itemBuilder: (context, index) {
+          final credit = list[index];
+          return _buildCreditCard(credit);
+        },
+      );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: list.length,
-      itemBuilder: (context, index) {
-        final credit = list[index];
-        return _buildCreditCard(credit);
-      },
+    return RefreshIndicator(
+      onRefresh: _loadCredits,
+      color: AppPalette.primary,
+      backgroundColor: AppPalette.surface,
+      child: content,
     );
   }
 

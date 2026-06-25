@@ -74,13 +74,6 @@ class ClientDrawer extends StatelessWidget {
                   title: 'Créditos',
                   index: 1,
                 ),
-                _buildDrawerItem(
-                  icon: Icons.notifications_outlined,
-                  selectedIcon: Icons.notifications,
-                  title: 'Notificaciones',
-                  index: 2,
-                  badgeCount: unreadNotificationsCount,
-                ),
               ],
             ),
           ),

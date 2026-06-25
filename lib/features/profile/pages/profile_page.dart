@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../../app/router.dart';
 import '../../../core/constants/app_palette.dart';
@@ -23,6 +24,7 @@ class ProfilePage extends StatefulWidget {
 
 class _ProfilePageState extends State<ProfilePage> {
   final _profileService = ProfileService();
+  final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -145,6 +147,40 @@ class _ProfilePageState extends State<ProfilePage> {
       debugPrint('Error al solicitar permiso de notificaciones Firebase: $e');
     }
 
+    // Initialize local notifications for foreground native banners
+    const AndroidInitializationSettings initializationSettingsAndroid =
+        AndroidInitializationSettings('@mipmap/ic_launcher');
+    const InitializationSettings initializationSettings = InitializationSettings(
+      android: initializationSettingsAndroid,
+    );
+
+    try {
+      await _localNotifications.initialize(
+        settings: initializationSettings,
+        onDidReceiveNotificationResponse: (NotificationResponse response) {
+          final payload = response.payload;
+          if (payload != null && payload.isNotEmpty) {
+            final companyId = int.tryParse(payload);
+            _goToCreditsForCompany(companyId);
+          }
+        },
+      );
+      
+      // Create high importance channel
+      const AndroidNotificationChannel channel = AndroidNotificationChannel(
+        'pos_alerts_channel', // id
+        'Alertas de POS', // name
+        description: 'Canal usado para notificaciones importantes del POS', // description
+        importance: Importance.max,
+      );
+
+      await _localNotifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          ?.createNotificationChannel(channel);
+    } catch (e) {
+      debugPrint('Error al inicializar local notifications: $e');
+    }
+
     // Handle background notifications when app is clicked/opened
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       debugPrint('Push de Firebase presionada en background/terminated');
@@ -168,59 +204,29 @@ class _ProfilePageState extends State<ProfilePage> {
       final notification = message.notification;
       if (notification != null && mounted) {
         final companyIdStr = message.data['id_empresa'];
-        final companyId = companyIdStr != null ? int.tryParse(companyIdStr.toString()) : null;
 
-        // Display a beautiful floating SnackBar in foreground
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            behavior: SnackBarBehavior.floating,
-            backgroundColor: AppPalette.text,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+        // Display a native system banner in foreground via flutter_local_notifications
+        try {
+          _localNotifications.show(
+            id: notification.hashCode,
+            title: notification.title,
+            body: notification.body,
+            notificationDetails: NotificationDetails(
+              android: AndroidNotificationDetails(
+                'pos_alerts_channel',
+                'Alertas de POS',
+                channelDescription: 'Canal usado para notificaciones importantes del POS',
+                importance: Importance.max,
+                priority: Priority.high,
+                icon: '@mipmap/ic_launcher',
+                styleInformation: BigTextStyleInformation(notification.body ?? ''),
+              ),
             ),
-            content: Row(
-              children: [
-                const Icon(
-                  Icons.notifications_active,
-                  color: AppPalette.primary,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        notification.title ?? 'Nueva notificación',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        notification.body ?? '',
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            action: SnackBarAction(
-              label: 'Ver Créditos',
-              textColor: AppPalette.primary,
-              onPressed: () {
-                _goToCreditsForCompany(companyId);
-              },
-            ),
-            duration: const Duration(seconds: 8),
-          ),
-        );
+            payload: companyIdStr?.toString(),
+          );
+        } catch (e) {
+          debugPrint('Error al mostrar notificacion local: $e');
+        }
 
         // Trigger a reload of selected company details to update notifications history list
         _loadSelectedCompanyDetails();
@@ -428,8 +434,6 @@ class _ProfilePageState extends State<ProfilePage> {
     String appBarTitle = 'Mi Perfil de Cliente';
     if (_currentSectionIndex == 1) {
       appBarTitle = 'Gestión de Créditos';
-    } else if (_currentSectionIndex == 2) {
-      appBarTitle = 'Notificaciones';
     }
 
     return Scaffold(
@@ -438,6 +442,45 @@ class _ProfilePageState extends State<ProfilePage> {
         title: Text(appBarTitle, style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        actions: _isLoading || _companies.isEmpty || _selectedProfile == null
+            ? null
+            : [
+                Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.notifications_none, size: 28),
+                      onPressed: _showNotificationsBottomSheet,
+                    ),
+                    if (_unreadCount > 0)
+                      Positioned(
+                        right: 8,
+                        top: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          decoration: const BoxDecoration(
+                            color: AppPalette.danger,
+                            shape: BoxShape.circle,
+                          ),
+                          constraints: const BoxConstraints(
+                            minWidth: 16,
+                            minHeight: 16,
+                          ),
+                          child: Text(
+                            _unreadCount.toString(),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(width: 8),
+              ],
       ),
       drawer: _isLoading || _companies.isEmpty || _selectedProfile == null
           ? null
@@ -580,8 +623,6 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
           ],
         );
-      case 2:
-        return _buildNotificationsSection();
       default:
         return _buildPersonalCard(persona);
     }
@@ -937,243 +978,260 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
-  Widget _buildNotificationsSection() {
-    return _buildNotificationsList();
-  }
-
-  Widget _buildNotificationsList() {
-    if (_notifications.isEmpty) {
-      return Card(
-        color: AppPalette.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: AppPalette.border),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Icon(
-                Icons.notifications_off_outlined,
-                size: 64,
-                color: AppPalette.textSoft.withValues(alpha: 0.8),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'No tienes notificaciones',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                  color: AppPalette.text,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Te mantendremos al tanto de cualquier novedad de ${_selectedCompany?.nombre ?? 'tu empresa'}.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: AppPalette.textSoft, fontSize: 14),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Card(
-      color: AppPalette.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: AppPalette.border),
+  void _showNotificationsBottomSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppPalette.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      elevation: 2,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.notifications_active_outlined, color: AppPalette.primary),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Historial (${_notifications.length})',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: AppPalette.text,
-                      ),
-                    ),
-                  ],
-                ),
-                if (_unreadCount > 0)
-                  Text(
-                    '$_unreadCount pendientes',
-                    style: const TextStyle(
-                      color: AppPalette.danger,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-              ],
-            ),
-            const Divider(height: 24, color: AppPalette.border),
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _notifications.length,
-              separatorBuilder: (context, index) => const Divider(height: 16, color: AppPalette.surface2),
-              itemBuilder: (context, index) {
-                final notification = _notifications[index];
-                final dateFormatted = _formatDateTime(notification.fecha);
-
-                Color priorityColor = AppPalette.textSoft;
-                if (notification.prioridad > 1) {
-                  priorityColor = AppPalette.danger;
-                } else if (notification.prioridad == 1) {
-                  priorityColor = AppPalette.warning;
+      builder: (BuildContext context) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.3,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (context, scrollController) {
+            return StatefulBuilder(
+              builder: (BuildContext context, StateSetter setModalState) {
+                void handleNotificationTap(NotificationModel notification) async {
+                  Navigator.of(context).pop(); // Close sheet
+                  _markAsRead(notification); // Mark as read and reload details
+                  _goToCreditsForCompany(notification.idEmpresa); // Navigate to credits
                 }
 
-                return InkWell(
-                  onTap: () {
-                    _markAsRead(notification);
-                    _goToCreditsForCompany(notification.idEmpresa);
-                  },
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                if (_notifications.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // Unread indicator dot or Priority icon
-                        Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Icon(
-                            notification.leido 
-                                ? Icons.notifications_none 
-                                : Icons.notifications_active,
-                            color: notification.leido 
-                                ? AppPalette.textSoft.withValues(alpha: 0.5) 
-                                : AppPalette.primary,
-                            size: 22,
+                        Icon(
+                          Icons.notifications_off_outlined,
+                          size: 64,
+                          color: AppPalette.textSoft.withValues(alpha: 0.8),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'No tienes notificaciones',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                            color: AppPalette.text,
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      notification.titulo,
-                                      style: TextStyle(
-                                        fontWeight: notification.leido 
-                                            ? FontWeight.w600 
-                                            : FontWeight.bold,
-                                        fontSize: 14,
-                                        color: notification.leido 
-                                            ? AppPalette.text 
-                                            : AppPalette.text,
-                                      ),
-                                    ),
-                                  ),
-                                  if (!notification.leido) ...[
-                                    const SizedBox(width: 8),
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: const BoxDecoration(
-                                        color: AppPalette.info,
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                notification.mensaje,
-                                style: TextStyle(
-                                  color: notification.leido 
-                                      ? AppPalette.textSoft 
-                                      : AppPalette.textSoft.withValues(alpha: 0.9),
-                                  fontSize: 13,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    dateFormatted,
-                                    style: const TextStyle(
-                                      color: AppPalette.textSoft,
-                                      fontSize: 11,
-                                    ),
-                                  ),
-                                  Row(
-                                    children: [
-                                      // Company Badge
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: AppPalette.primary.withValues(alpha: 0.1),
-                                          borderRadius: BorderRadius.circular(4),
-                                          border: Border.all(
-                                            color: AppPalette.primary.withValues(alpha: 0.3),
-                                          ),
-                                        ),
-                                        child: Text(
-                                          _getCompanyName(notification.idEmpresa),
-                                          style: const TextStyle(
-                                            color: AppPalette.primary,
-                                            fontSize: 9,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ),
-                                      if (notification.prioridad > 0) ...[
-                                        const SizedBox(width: 6),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                                          decoration: BoxDecoration(
-                                            color: priorityColor.withValues(alpha: 0.1),
-                                            borderRadius: BorderRadius.circular(4),
-                                          ),
-                                          child: Text(
-                                            notification.prioridad > 1 ? 'ALTA' : 'MEDIA',
-                                            style: TextStyle(
-                                              color: priorityColor,
-                                              fontSize: 9,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Te mantendremos al tanto de cualquier novedad de ${_selectedCompany?.nombre ?? 'tu empresa'}.',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: AppPalette.textSoft, fontSize: 14),
                         ),
                       ],
                     ),
-                  ),
+                  );
+                }
+
+                return Column(
+                  children: [
+                    Center(
+                      child: Container(
+                        margin: const EdgeInsets.only(top: 12, bottom: 8),
+                        width: 40,
+                        height: 5,
+                        decoration: BoxDecoration(
+                          color: AppPalette.border,
+                          borderRadius: BorderRadius.circular(2.5),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.notifications_active_outlined, color: AppPalette.primary),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Historial (${_notifications.length})',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 18,
+                                  color: AppPalette.text,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (_unreadCount > 0)
+                            Text(
+                              '$_unreadCount pendientes',
+                              style: const TextStyle(
+                                color: AppPalette.danger,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1, color: AppPalette.border),
+                    Expanded(
+                      child: ListView.separated(
+                        controller: scrollController,
+                        padding: const EdgeInsets.all(16),
+                        itemCount: _notifications.length,
+                        separatorBuilder: (context, index) => const Divider(height: 16, color: AppPalette.surface2),
+                        itemBuilder: (context, index) {
+                          final notification = _notifications[index];
+                          final dateFormatted = _formatDateTime(notification.fecha);
+
+                          Color priorityColor = AppPalette.textSoft;
+                          if (notification.prioridad > 1) {
+                            priorityColor = AppPalette.danger;
+                          } else if (notification.prioridad == 1) {
+                            priorityColor = AppPalette.warning;
+                          }
+
+                          return InkWell(
+                            onTap: () {
+                              handleNotificationTap(notification);
+                            },
+                            borderRadius: BorderRadius.circular(8),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Icon(
+                                      notification.leido 
+                                          ? Icons.notifications_none 
+                                          : Icons.notifications_active,
+                                      color: notification.leido 
+                                          ? AppPalette.textSoft.withValues(alpha: 0.5) 
+                                          : AppPalette.primary,
+                                      size: 22,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                notification.titulo,
+                                                style: TextStyle(
+                                                  fontWeight: notification.leido 
+                                                      ? FontWeight.w600 
+                                                      : FontWeight.bold,
+                                                  fontSize: 14,
+                                                  color: AppPalette.text,
+                                                ),
+                                              ),
+                                            ),
+                                            if (!notification.leido) ...[
+                                              const SizedBox(width: 8),
+                                              Container(
+                                                width: 8,
+                                                height: 8,
+                                                decoration: const BoxDecoration(
+                                                  color: AppPalette.info,
+                                                  shape: BoxShape.circle,
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          notification.mensaje,
+                                          style: TextStyle(
+                                            color: notification.leido 
+                                                ? AppPalette.textSoft 
+                                                : AppPalette.textSoft.withValues(alpha: 0.9),
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            Text(
+                                              dateFormatted,
+                                              style: const TextStyle(
+                                                color: AppPalette.textSoft,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                            Row(
+                                              children: [
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                                  decoration: BoxDecoration(
+                                                    color: AppPalette.primary.withValues(alpha: 0.1),
+                                                    borderRadius: BorderRadius.circular(4),
+                                                    border: Border.all(
+                                                      color: AppPalette.primary.withValues(alpha: 0.3),
+                                                    ),
+                                                  ),
+                                                  child: Text(
+                                                    _getCompanyName(notification.idEmpresa),
+                                                    style: const TextStyle(
+                                                      color: AppPalette.primary,
+                                                      fontSize: 9,
+                                                      fontWeight: FontWeight.bold,
+                                                    ),
+                                                  ),
+                                                ),
+                                                if (notification.prioridad > 0) ...[
+                                                  const SizedBox(width: 6),
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                                    decoration: BoxDecoration(
+                                                      color: priorityColor.withValues(alpha: 0.1),
+                                                      borderRadius: BorderRadius.circular(4),
+                                                    ),
+                                                    child: Text(
+                                                      notification.prioridad > 1 ? 'ALTA' : 'MEDIA',
+                                                      style: TextStyle(
+                                                        color: priorityColor,
+                                                        fontSize: 9,
+                                                        fontWeight: FontWeight.bold,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 );
               },
-            ),
-          ],
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
   }
 
