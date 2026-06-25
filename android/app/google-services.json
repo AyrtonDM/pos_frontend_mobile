@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "181449830908",
+    "project_id": "pos-si2",
+    "storage_bucket": "pos-si2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:181449830908:android:760a2f98e949302c218279",
+        "android_client_info": {
+          "package_name": "pos.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBZN8dGUtDSeq9J95Tygi2yntCwujHlDE8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
