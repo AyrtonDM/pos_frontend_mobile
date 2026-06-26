@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import '../../../core/api_service.dart';
 import '../../../core/storage/token_storage.dart';
 import '../models/company_model.dart';
@@ -106,6 +107,8 @@ class ProfileService {
   }
 
   Future<bool> registerDeviceToken(String token, int userId, int companyId) async {
+    final String tokenParcial = token.length > 20 ? token.substring(0, 20) : token;
+    debugPrint('[FCM REGISTER] Enviando token a backend: uid=$userId empresa=$companyId token=$tokenParcial...');
     try {
       final response = await _apiService.post('/notifications/register-token', {
         'token': token,
@@ -114,10 +117,16 @@ class ProfileService {
         'plataforma': 'android',
         'id_empresa': companyId,
       });
+      debugPrint('[FCM REGISTER] Respuesta del backend: $response');
       if (response is Map<String, dynamic> && response['ok'] == true) {
+        debugPrint('[FCM REGISTER] Token registrado exitosamente para empresa=$companyId');
         return true;
       }
-    } catch (_) {}
+      debugPrint('[FCM REGISTER] Respuesta inesperada del backend: $response');
+    } catch (e, st) {
+      debugPrint('[FCM REGISTER] ERROR al registrar token: $e');
+      debugPrint('[FCM REGISTER] StackTrace: $st');
+    }
     return false;
   }
 }

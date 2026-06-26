@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../../app/router.dart';
 import '../../../core/constants/app_palette.dart';
+import '../../../core/services/fcm_global_service.dart';
 import '../../../core/utils/jwt_decoder.dart';
 import '../../../shared/widgets/side_menu_scaffold.dart';
 import '../models/client_category_model.dart';
@@ -24,9 +24,14 @@ class ProfilePage extends StatefulWidget {
 
 class _ProfilePageState extends State<ProfilePage> {
   final _profileService = ProfileService();
-  final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
   bool _isLoading = true;
   String? _errorMessage;
+
+  // FCM stream subscriptions gestionadas por este widget
+  // (onMessage y onMessageOpenedApp viven en FcmGlobalService)
+  StreamSubscription<Map<String, dynamic>>? _onNotificationTapSub;
+  StreamSubscription<String>? _onTokenRefreshSub;
+  bool _firebaseMessagingInitialized = false;
 
   // Logged in user info
   int? _userId;
@@ -36,7 +41,7 @@ class _ProfilePageState extends State<ProfilePage> {
   List<Company> _companies = [];
   List<ClientProfile> _clientProfiles = [];
   List<NotificationModel> _notifications = [];
-  
+
   // Selected company and corresponding profiles
   Company? _selectedCompany;
   ClientProfile? _selectedProfile;
@@ -81,10 +86,7 @@ class _ProfilePageState extends State<ProfilePage> {
       _userId = int.parse(userIdStr);
       _userEmail = email;
 
-      // Initialize Firebase Messaging
-      _initFirebaseMessaging();
-
-      // Fetch companies and client profiles in parallel
+      // Fetch companies and client profiles in parallel FIRST
       final results = await Future.wait([
         _profileService.getMyCompanies(),
         _profileService.getMyClientProfiles(_userId!),
@@ -95,23 +97,25 @@ class _ProfilePageState extends State<ProfilePage> {
 
       if (_companies.isNotEmpty && _clientProfiles.isNotEmpty) {
         _selectedCompany = _companies.first;
-        
+
+        // Initialize Firebase Messaging AFTER companies are loaded
+        // so onTokenRefresh can register tokens per company immediately
+        await _initFirebaseMessaging();
+
         // Get real Firebase Cloud Messaging token
         String? fcmToken;
         try {
           fcmToken = await FirebaseMessaging.instance.getToken();
-          debugPrint('FCM Token obtenido: $fcmToken');
+          debugPrint('[FCM] Token obtenido: $fcmToken');
         } catch (e) {
-          debugPrint('Error al obtener token FCM: $e');
+          debugPrint('[FCM] Error al obtener token FCM: $e');
         }
-        
-        // Register token for all companies
-        for (final company in _companies) {
-          _profileService.registerDeviceToken(
-            fcmToken ?? 'mock_token_user_${_userId}_company_${company.idEmpresa}',
-            _userId!,
-            company.idEmpresa,
-          );
+
+        // Register token for all companies only if real
+        if (fcmToken != null && fcmToken.isNotEmpty) {
+          await _registerFcmTokenForCompanies(fcmToken);
+        } else {
+          debugPrint('[FCM] No se obtuvo token FCM real, no se registra dispositivo.');
         }
 
         await _loadSelectedCompanyDetails();
@@ -130,112 +134,87 @@ class _ProfilePageState extends State<ProfilePage> {
 
   @override
   void dispose() {
+    _onNotificationTapSub?.cancel();
+    _onTokenRefreshSub?.cancel();
     super.dispose();
   }
 
+  Future<void> _registerFcmTokenForCompanies(String token) async {
+    if (_userId == null) {
+      debugPrint('[FCM] register device token abortado: userId es nulo.');
+      return;
+    }
+    if (_companies.isEmpty) {
+      debugPrint('[FCM] register device token abortado: la lista de empresas está vacía.');
+      return;
+    }
+    if (token.isEmpty) {
+      debugPrint('[FCM] register device token abortado: token es vacío.');
+      return;
+    }
+
+    final String tokenParcial = token.length > 20 ? token.substring(0, 20) : token;
+    debugPrint('[FCM] Iniciando registro de token para $_userId con token parcial: $tokenParcial...');
+    
+    for (final company in _companies) {
+      final success = await _profileService.registerDeviceToken(
+        token,
+        _userId!,
+        company.idEmpresa,
+      );
+      debugPrint('[FCM] Registro en backend para idEmpresa: ${company.idEmpresa} -> ${success ? "EXITOSO" : "FALLIDO"}');
+    }
+  }
+
   Future<void> _initFirebaseMessaging() async {
-    // Request permission for push notifications
     final messaging = FirebaseMessaging.instance;
+
+    // 1. Solicitar permiso (Android 13+, iOS)
     try {
-      NotificationSettings settings = await messaging.requestPermission(
+      final NotificationSettings settings = await messaging.requestPermission(
         alert: true,
         badge: true,
         sound: true,
       );
-      debugPrint('Permiso de notificaciones push de Firebase: ${settings.authorizationStatus}');
-    } catch (e) {
-      debugPrint('Error al solicitar permiso de notificaciones Firebase: $e');
-    }
-
-    // Initialize local notifications for foreground native banners
-    const AndroidInitializationSettings initializationSettingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const InitializationSettings initializationSettings = InitializationSettings(
-      android: initializationSettingsAndroid,
-    );
-
-    try {
-      await _localNotifications.initialize(
-        settings: initializationSettings,
-        onDidReceiveNotificationResponse: (NotificationResponse response) {
-          final payload = response.payload;
-          if (payload != null && payload.isNotEmpty) {
-            final companyId = int.tryParse(payload);
-            _goToCreditsForCompany(companyId);
-          }
-        },
-      );
-      
-      // Create high importance channel
-      const AndroidNotificationChannel channel = AndroidNotificationChannel(
-        'pos_alerts_channel', // id
-        'Alertas de POS', // name
-        description: 'Canal usado para notificaciones importantes del POS', // description
-        importance: Importance.max,
-      );
-
-      await _localNotifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-          ?.createNotificationChannel(channel);
-    } catch (e) {
-      debugPrint('Error al inicializar local notifications: $e');
-    }
-
-    // Handle background notifications when app is clicked/opened
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      debugPrint('Push de Firebase presionada en background/terminated');
-      _handleFirebaseMessageClick(message);
-    });
-
-    // Check if app was opened via a notification when terminated
-    try {
-      RemoteMessage? initialMessage = await messaging.getInitialMessage();
-      if (initialMessage != null) {
-        debugPrint('App abierta desde estado terminado vía push de Firebase');
-        _handleFirebaseMessageClick(initialMessage);
+      debugPrint('[FCM] Estado del permiso: ${settings.authorizationStatus}');
+      if (settings.authorizationStatus == AuthorizationStatus.denied) {
+        debugPrint('[FCM] El usuario RECHAZÓ los permisos de notificación. No se recibirán pushes.');
+        return;
       }
     } catch (e) {
-      debugPrint('Error al obtener mensaje inicial de Firebase: $e');
+      debugPrint('[FCM] Error al solicitar permisos: $e');
     }
 
-    // Listen to foreground notifications
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('Mensaje push de Firebase recibido en primer plano: ${message.notification?.title}');
-      final notification = message.notification;
-      if (notification != null && mounted) {
-        final companyIdStr = message.data['id_empresa'];
-
-        // Display a native system banner in foreground via flutter_local_notifications
-        try {
-          _localNotifications.show(
-            id: notification.hashCode,
-            title: notification.title,
-            body: notification.body,
-            notificationDetails: NotificationDetails(
-              android: AndroidNotificationDetails(
-                'pos_alerts_channel',
-                'Alertas de POS',
-                channelDescription: 'Canal usado para notificaciones importantes del POS',
-                importance: Importance.max,
-                priority: Priority.high,
-                icon: '@mipmap/ic_launcher',
-                styleInformation: BigTextStyleInformation(notification.body ?? ''),
-              ),
-            ),
-            payload: companyIdStr?.toString(),
-          );
-        } catch (e) {
-          debugPrint('Error al mostrar notificacion local: $e');
-        }
-
-        // Trigger a reload of selected company details to update notifications history list
-        _loadSelectedCompanyDetails();
+    // 2. Token refresh — re-registrar en backend si el token cambia
+    _onTokenRefreshSub?.cancel();
+    _onTokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+      debugPrint('[FCM] Token refrescado: ${newToken.substring(0, 20)}...');
+      if (_userId != null && _companies.isNotEmpty) {
+        _registerFcmTokenForCompanies(newToken);
       }
     });
+
+    // 3. Procesar notificación de apertura pendiente si existe (estado terminado)
+    final pendingTap = FcmGlobalService.instance.pendingNotificationTap;
+    if (pendingTap != null) {
+      debugPrint('[FCM] Procesando notificación pendiente (terminated): $pendingTap');
+      FcmGlobalService.instance.clearPendingNotificationTap();
+      _handleNotificationTapData(pendingTap);
+    }
+
+    // 4. Suscribirse a los taps de notificación globales (foreground/background)
+    _onNotificationTapSub?.cancel();
+    _onNotificationTapSub = FcmGlobalService.instance.notificationTaps.listen((data) {
+      debugPrint('[FCM] Notificación presionada recibida en ProfilePage: $data');
+      _handleNotificationTapData(data);
+    });
+
+    _firebaseMessagingInitialized = true;
+    debugPrint('[FCM] _initFirebaseMessaging completado en ProfilePage.');
   }
 
-  void _handleFirebaseMessageClick(RemoteMessage message) {
-    final companyIdStr = message.data['id_empresa'];
+  void _handleNotificationTapData(Map<String, dynamic> data) {
+    final companyIdStr = data['id_empresa'];
     final companyId = companyIdStr != null ? int.tryParse(companyIdStr.toString()) : null;
     _goToCreditsForCompany(companyId);
   }
